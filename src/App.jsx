@@ -16,7 +16,6 @@ import {
 
 const ADMIN_SECRET = import.meta.env.VITE_ADMIN_SECRET || 'MySecretKey2026';
 
-// Deterministic hash generator (works 100% offline without a database)
 function computeSignature(tag) {
   const raw = `${tag.toUpperCase()}::${ADMIN_SECRET}`;
   let h1 = 0xdeadbeef;
@@ -32,15 +31,13 @@ function computeSignature(tag) {
 
 function generateSignedKey(clientTag) {
   const cleanTag = clientTag.replace(/[^A-Za-z0-9]/g, '').toUpperCase().slice(0, 8) || 'CLIENT';
-  const sig = computeSignature(cleanTag);
-  return `PRO-${cleanTag}-${sig}`;
+  return `PRO-${cleanTag}-${computeSignature(cleanTag)}`;
 }
 
 function validateSignedKey(fullKey) {
   const parts = fullKey.trim().toUpperCase().split('-');
   if (parts.length !== 3 || parts[0] !== 'PRO') return false;
-  const [, tag, sig] = parts;
-  return computeSignature(tag) === sig;
+  return computeSignature(parts[1]) === parts[2];
 }
 
 export default function App() {
@@ -86,12 +83,14 @@ export default function App() {
     { desc: 'LED Lighting & Electrical Fitting', qty: 1, rate: 8500 }
   ]);
 
-  // Refs
+  // Refs & Mobile Preview Scale
   const canvasRef = useRef(null);
   const [isDrawing, setIsDrawing] = useState(false);
+  const [isSharing, setIsSharing] = useState(false);
   const pdfRef = useRef(null);
+  const previewContainerRef = useRef(null);
+  const [previewScale, setPreviewScale] = useState(1);
 
-  // Verify saved license on mount
   useEffect(() => {
     if (licenseKey && validateSignedKey(licenseKey)) {
       setIsPro(true);
@@ -103,6 +102,19 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('qq_profile', JSON.stringify(profile));
   }, [profile]);
+
+  // Auto-fit A4 preview cleanly on mobile screens without sideways scrolling
+  useEffect(() => {
+    const updateScale = () => {
+      if (!previewContainerRef.current) return;
+      const containerWidth = previewContainerRef.current.offsetWidth;
+      const a4Width = 680;
+      setPreviewScale(containerWidth < a4Width ? containerWidth / a4Width : 1);
+    };
+    updateScale();
+    window.addEventListener('resize', updateScale);
+    return () => window.removeEventListener('resize', updateScale);
+  }, []);
 
   const handleActivateLicense = () => {
     if (validateSignedKey(keyInput)) {
@@ -118,14 +130,11 @@ export default function App() {
   };
 
   const handleGenerateKey = () => {
-    if (secretInput !== ADMIN_SECRET) {
-      return alert('Incorrect Admin Secret!');
-    }
+    if (secretInput !== ADMIN_SECRET) return alert('Incorrect Admin Secret!');
     const key = generateSignedKey(newClientTag || `USER${Math.floor(100 + Math.random() * 900)}`);
     setGeneratedKey(key);
   };
 
-  // Backup & Restore Business Profile JSON
   const exportProfileBackup = () => {
     const blob = new Blob([JSON.stringify(profile, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -142,8 +151,7 @@ export default function App() {
     const reader = new FileReader();
     reader.onload = (event) => {
       try {
-        const parsed = JSON.parse(event.target.result);
-        setProfile(parsed);
+        setProfile(JSON.parse(event.target.result));
         alert('Business profile & signature restored!');
       } catch {
         alert('Invalid backup file.');
@@ -152,7 +160,6 @@ export default function App() {
     reader.readAsText(file);
   };
 
-  // Logo Upload
   const handleLogoUpload = (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -161,13 +168,23 @@ export default function App() {
     reader.readAsDataURL(file);
   };
 
-  // Signature Drawing Handlers
-  const startDraw = (e) => {
+  // Accurate Touch & Mouse Coordinates for Signature Box
+  const getCanvasCoords = (e) => {
     const canvas = canvasRef.current;
-    const ctx = canvas.getContext('2d');
     const rect = canvas.getBoundingClientRect();
-    const x = (e.touches ? e.touches[0].clientX : e.clientX) - rect.left;
-    const y = (e.touches ? e.touches[0].clientY : e.clientY) - rect.top;
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+    const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+    return {
+      x: (clientX - rect.left) * scaleX,
+      y: (clientY - rect.top) * scaleY
+    };
+  };
+
+  const startDraw = (e) => {
+    const ctx = canvasRef.current.getContext('2d');
+    const { x, y } = getCanvasCoords(e);
     ctx.beginPath();
     ctx.moveTo(x, y);
     setIsDrawing(true);
@@ -175,13 +192,11 @@ export default function App() {
 
   const draw = (e) => {
     if (!isDrawing) return;
-    const canvas = canvasRef.current;
-    const ctx = canvas.getContext('2d');
-    const rect = canvas.getBoundingClientRect();
-    const x = (e.touches ? e.touches[0].clientX : e.clientX) - rect.left;
-    const y = (e.touches ? e.touches[0].clientY : e.clientY) - rect.top;
-    ctx.lineWidth = 2;
+    const ctx = canvasRef.current.getContext('2d');
+    const { x, y } = getCanvasCoords(e);
+    ctx.lineWidth = 2.2;
     ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
     ctx.strokeStyle = '#0f172a';
     ctx.lineTo(x, y);
     ctx.stroke();
@@ -190,14 +205,12 @@ export default function App() {
   const endDraw = () => {
     if (!isDrawing) return;
     setIsDrawing(false);
-    const dataUrl = canvasRef.current.toDataURL('image/png');
-    setProfile({ ...profile, signatureBase64: dataUrl });
+    setProfile({ ...profile, signatureBase64: canvasRef.current.toDataURL('image/png') });
   };
 
   const clearSignature = () => {
     const canvas = canvasRef.current;
-    const ctx = canvas.getContext('2d');
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
     setProfile({ ...profile, signatureBase64: '' });
   };
 
@@ -220,13 +233,13 @@ export default function App() {
     jsPDF: { unit: 'in', format: 'a4', orientation: 'portrait' }
   });
 
-  // Download PDF
   const downloadPDF = () => {
     html2pdf().set(getPdfOptions()).from(pdfRef.current).save();
   };
 
-  // Direct PDF File Share on WhatsApp (Mobile Native Share + Desktop Fallback)
   const shareOnWhatsApp = async () => {
+    if (isSharing) return;
+    setIsSharing(true);
     const opt = getPdfOptions();
     try {
       const pdfBlob = await html2pdf().set(opt).from(pdfRef.current).outputPdf('blob');
@@ -241,30 +254,31 @@ export default function App() {
       } else {
         html2pdf().set(opt).from(pdfRef.current).save();
         const msg = `Hello ${clientName},\n\nPlease find your *${docType} (${docNumber})* from *${profile.companyName}*.\n*Total Amount:* ₹${grandTotal.toLocaleString('en-IN')}\n\n(Attaching the downloaded PDF file)`;
-        const url = `https://wa.me/${clientPhone.replace(/\D/g, '')}?text=${encodeURIComponent(msg)}`;
-        window.open(url, '_blank');
+        window.open(`https://wa.me/${clientPhone.replace(/\D/g, '')}?text=${encodeURIComponent(msg)}`, '_blank');
       }
     } catch (err) {
       if (err.name !== 'AbortError') {
         alert('Could not share directly. Please use Download PDF and send via WhatsApp.');
       }
+    } finally {
+      setIsSharing(false);
     }
   };
 
   return (
-    <div className="min-h-screen bg-slate-100 text-slate-800">
-      {/* Top Navbar */}
-      <header className="bg-slate-900 text-white px-4 py-3 shadow-md flex flex-wrap items-center justify-between gap-2">
+    <div className="min-h-screen bg-slate-100 text-slate-800 pb-16 md:pb-6">
+      {/* Compact Top Navbar */}
+      <header className="sticky top-0 z-30 bg-slate-900 text-white px-3.5 py-2.5 shadow-md flex items-center justify-between gap-2">
         <div className="flex items-center gap-2">
-          <FileText className="w-6 h-6 text-blue-400" />
-          <span className="font-bold text-lg tracking-tight">QuickQuote Pro</span>
+          <FileText className="w-5 h-5 text-blue-400 shrink-0" />
+          <span className="font-bold text-base tracking-tight">QuickQuote Pro</span>
           {isPro ? (
-            <span className="bg-emerald-500/20 text-emerald-300 text-xs px-2 py-0.5 rounded-full flex items-center gap-1 border border-emerald-500/30">
-              <ShieldCheck className="w-3.5 h-3.5" /> PRO LIFETIME
+            <span className="bg-emerald-500/20 text-emerald-300 text-[10px] px-2 py-0.5 rounded-full flex items-center gap-1 border border-emerald-500/30">
+              <ShieldCheck className="w-3 h-3" /> PRO
             </span>
           ) : (
-            <span className="bg-amber-500/20 text-amber-300 text-xs px-2 py-0.5 rounded-full border border-amber-500/30">
-              FREE DEMO MODE
+            <span className="bg-amber-500/20 text-amber-300 text-[10px] px-2 py-0.5 rounded-full border border-amber-500/30">
+              DEMO
             </span>
           )}
         </div>
@@ -273,38 +287,41 @@ export default function App() {
           {!isPro && (
             <button
               onClick={() => setShowLicenseModal(true)}
-              className="bg-amber-500 hover:bg-amber-600 text-slate-950 font-semibold text-xs sm:text-sm px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition"
+              className="bg-amber-500 hover:bg-amber-600 text-slate-950 font-semibold text-xs px-2.5 py-1.5 rounded-lg flex items-center gap-1 transition"
             >
-              <Key className="w-4 h-4" /> Unlock Pro
+              <Key className="w-3.5 h-3.5" /> Unlock Pro
             </button>
           )}
-          <button
-            onClick={downloadPDF}
-            className="bg-blue-600 hover:bg-blue-700 text-white font-semibold text-xs sm:text-sm px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition"
-          >
-            <Download className="w-4 h-4" /> PDF
-          </button>
-          <button
-            onClick={shareOnWhatsApp}
-            className="bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs sm:text-sm px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition"
-          >
-            <Share2 className="w-4 h-4" /> Send on WhatsApp
-          </button>
+          <div className="hidden md:flex items-center gap-2">
+            <button
+              onClick={downloadPDF}
+              className="bg-blue-600 hover:bg-blue-700 text-white font-semibold text-xs px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition"
+            >
+              <Download className="w-3.5 h-3.5" /> Download PDF
+            </button>
+            <button
+              onClick={shareOnWhatsApp}
+              disabled={isSharing}
+              className="bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition"
+            >
+              <Share2 className="w-3.5 h-3.5" /> {isSharing ? 'Preparing...' : 'Send on WhatsApp'}
+            </button>
+          </div>
         </div>
       </header>
 
       {/* Main Split Workspace */}
-      <main className="max-w-7xl mx-auto p-4 grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* LEFT PANEL: Editor Controls */}
-        <div className="lg:col-span-5 space-y-4">
+      <main className="max-w-7xl mx-auto p-3 sm:p-4 grid grid-cols-1 lg:grid-cols-12 gap-4">
+        {/* LEFT PANEL: Compact Editor Controls */}
+        <div className="lg:col-span-5 space-y-3">
           {/* 1. Document Type & Meta */}
-          <div className="bg-white p-4 rounded-xl shadow-sm border border-slate-200 space-y-3">
-            <div className="flex gap-2">
+          <div className="bg-white p-3.5 rounded-xl shadow-sm border border-slate-200 space-y-2.5">
+            <div className="flex gap-1.5">
               {['QUOTATION', 'TAX INVOICE'].map((type) => (
                 <button
                   key={type}
                   onClick={() => setDocType(type)}
-                  className={`flex-1 py-2 rounded-lg font-semibold text-sm transition ${
+                  className={`flex-1 py-1.5 rounded-lg font-semibold text-xs transition ${
                     docType === type ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600'
                   }`}
                 >
@@ -312,46 +329,42 @@ export default function App() {
                 </button>
               ))}
             </div>
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-2 gap-2.5">
               <div>
-                <label className="text-xs font-medium text-slate-500">Document No.</label>
+                <label className="text-[11px] font-medium text-slate-500">Document No.</label>
                 <input
                   value={docNumber}
                   onChange={(e) => setDocNumber(e.target.value)}
-                  className="w-full mt-1 px-3 py-1.5 border rounded-lg text-sm"
+                  className="w-full mt-0.5 px-2.5 py-1.5 border border-slate-300 rounded-lg text-xs sm:text-sm"
                 />
               </div>
               <div>
-                <label className="text-xs font-medium text-slate-500">Date</label>
+                <label className="text-[11px] font-medium text-slate-500">Date</label>
                 <input
                   type="date"
                   value={docDate}
                   onChange={(e) => setDocDate(e.target.value)}
-                  className="w-full mt-1 px-3 py-1.5 border rounded-lg text-sm"
+                  className="w-full mt-0.5 px-2.5 py-1.5 border border-slate-300 rounded-lg text-xs sm:text-sm"
                 />
               </div>
             </div>
           </div>
 
-          {/* 2. Company Profile & Digital Sign */}
-          <div className="bg-white p-4 rounded-xl shadow-sm border border-slate-200 space-y-3">
+          {/* 2. Business Profile & Enlarged Signature Box */}
+          <div className="bg-white p-3.5 rounded-xl shadow-sm border border-slate-200 space-y-2.5">
             <div className="flex items-center justify-between">
-              <h2 className="font-bold text-sm flex items-center gap-1.5 text-slate-700">
+              <h2 className="font-bold text-xs sm:text-sm flex items-center gap-1.5 text-slate-700">
                 <Building2 className="w-4 h-4 text-blue-600" /> Your Business & Signature
               </h2>
               <div className="flex items-center gap-2">
                 <button
                   onClick={exportProfileBackup}
-                  title="Download Profile Backup"
-                  className="text-xs text-slate-600 hover:text-blue-600 flex items-center gap-1"
+                  className="text-[11px] text-slate-600 hover:text-blue-600 flex items-center gap-1"
                 >
-                  <Save className="w-3.5 h-3.5" /> Backup
+                  <Save className="w-3 h-3" /> Backup
                 </button>
-                <label
-                  title="Restore Profile Backup"
-                  className="text-xs text-slate-600 hover:text-blue-600 flex items-center gap-1 cursor-pointer"
-                >
-                  <Upload className="w-3.5 h-3.5" /> Restore
+                <label className="text-[11px] text-slate-600 hover:text-blue-600 flex items-center gap-1 cursor-pointer">
+                  <Upload className="w-3 h-3" /> Restore
                   <input type="file" accept=".json" onChange={importProfileBackup} className="hidden" />
                 </label>
               </div>
@@ -362,63 +375,63 @@ export default function App() {
                 placeholder="Company Name"
                 value={profile.companyName}
                 onChange={(e) => setProfile({ ...profile, companyName: e.target.value })}
-                className="px-3 py-1.5 border rounded-lg text-sm col-span-2"
+                className="px-2.5 py-1.5 border border-slate-300 rounded-lg text-xs sm:text-sm col-span-2"
               />
               <input
                 placeholder="GSTIN (Optional)"
                 value={profile.gstin}
                 onChange={(e) => setProfile({ ...profile, gstin: e.target.value })}
-                className="px-3 py-1.5 border rounded-lg text-sm"
+                className="px-2.5 py-1.5 border border-slate-300 rounded-lg text-xs sm:text-sm"
               />
               <input
                 placeholder="Phone Number"
                 value={profile.phone}
                 onChange={(e) => setProfile({ ...profile, phone: e.target.value })}
-                className="px-3 py-1.5 border rounded-lg text-sm"
+                className="px-2.5 py-1.5 border border-slate-300 rounded-lg text-xs sm:text-sm"
               />
               <input
                 placeholder="Office Address"
                 value={profile.address}
                 onChange={(e) => setProfile({ ...profile, address: e.target.value })}
-                className="px-3 py-1.5 border rounded-lg text-sm col-span-2"
+                className="px-2.5 py-1.5 border border-slate-300 rounded-lg text-xs sm:text-sm col-span-2"
               />
               <input
                 placeholder="UPI / Bank Details"
                 value={profile.bankDetails}
                 onChange={(e) => setProfile({ ...profile, bankDetails: e.target.value })}
-                className="px-3 py-1.5 border rounded-lg text-sm col-span-2"
+                className="px-2.5 py-1.5 border border-slate-300 rounded-lg text-xs sm:text-sm col-span-2"
               />
             </div>
 
             {/* Logo & Color Theme */}
-            <div className="flex items-center justify-between gap-3 pt-1">
-              <label className="text-xs bg-slate-100 hover:bg-slate-200 px-3 py-2 rounded-lg cursor-pointer font-medium">
+            <div className="flex items-center justify-between gap-2 pt-0.5">
+              <label className="text-xs bg-slate-100 hover:bg-slate-200 px-2.5 py-1.5 rounded-lg cursor-pointer font-medium">
                 Upload Logo
                 <input type="file" accept="image/*" onChange={handleLogoUpload} className="hidden" />
               </label>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-1.5">
                 <span className="text-xs text-slate-500">Brand Color:</span>
                 <input
                   type="color"
                   value={profile.brandColor}
                   onChange={(e) => setProfile({ ...profile, brandColor: e.target.value })}
-                  className="w-8 h-8 rounded cursor-pointer border-0"
+                  className="w-7 h-7 rounded cursor-pointer border-0"
                 />
               </div>
             </div>
 
-            {/* Live Digital Signature Pad */}
-            <div>
+            {/* ONLY THIS BOX IS ENLARGED: Digital Signature Pad */}
+            <div className="pt-1">
               <div className="flex items-center justify-between mb-1">
-                <span className="text-xs font-medium text-slate-500">Draw Digital Signature Below:</span>
+                <span className="text-xs font-medium text-slate-600">Draw Digital Signature Below:</span>
                 <button onClick={clearSignature} className="text-xs text-rose-600 flex items-center gap-1">
                   <Eraser className="w-3 h-3" /> Clear
                 </button>
               </div>
               <canvas
                 ref={canvasRef}
-                width={320}
-                height={80}
+                width={440}
+                height={150}
                 onMouseDown={startDraw}
                 onMouseMove={draw}
                 onMouseUp={endDraw}
@@ -426,44 +439,45 @@ export default function App() {
                 onTouchStart={startDraw}
                 onTouchMove={draw}
                 onTouchEnd={endDraw}
-                className="w-full h-20 border border-dashed border-slate-400 rounded-lg bg-slate-50 touch-none cursor-crosshair"
+                className="w-full h-32 border-2 border-dashed border-slate-400 rounded-lg bg-slate-50 touch-none cursor-crosshair"
               />
             </div>
           </div>
 
           {/* 3. Client Details */}
-          <div className="bg-white p-4 rounded-xl shadow-sm border border-slate-200 space-y-2">
-            <h2 className="font-bold text-sm text-slate-700">Client Details (Bill To)</h2>
+          <div className="bg-white p-3.5 rounded-xl shadow-sm border border-slate-200 space-y-2">
+            <h2 className="font-bold text-xs sm:text-sm text-slate-700">Client Details (Bill To)</h2>
             <div className="grid grid-cols-2 gap-2">
               <input
                 placeholder="Client / Party Name"
                 value={clientName}
                 onChange={(e) => setClientName(e.target.value)}
-                className="px-3 py-1.5 border rounded-lg text-sm"
+                className="px-2.5 py-1.5 border border-slate-300 rounded-lg text-xs sm:text-sm"
               />
               <input
+                type="tel"
                 placeholder="Client WhatsApp No."
                 value={clientPhone}
                 onChange={(e) => setClientPhone(e.target.value)}
-                className="px-3 py-1.5 border rounded-lg text-sm"
+                className="px-2.5 py-1.5 border border-slate-300 rounded-lg text-xs sm:text-sm"
               />
               <input
                 placeholder="Client City / Address"
                 value={clientAddress}
                 onChange={(e) => setClientAddress(e.target.value)}
-                className="px-3 py-1.5 border rounded-lg text-sm col-span-2"
+                className="px-2.5 py-1.5 border border-slate-300 rounded-lg text-xs sm:text-sm col-span-2"
               />
             </div>
           </div>
 
-          {/* 4. Line Items & GST */}
-          <div className="bg-white p-4 rounded-xl shadow-sm border border-slate-200 space-y-3">
+          {/* 4. Compact Line Items & GST */}
+          <div className="bg-white p-3.5 rounded-xl shadow-sm border border-slate-200 space-y-2.5">
             <div className="flex items-center justify-between">
-              <h2 className="font-bold text-sm text-slate-700">Items & Services</h2>
+              <h2 className="font-bold text-xs sm:text-sm text-slate-700">Items & Services</h2>
               <select
                 value={gstRate}
                 onChange={(e) => setGstRate(Number(e.target.value))}
-                className="text-xs border rounded-lg px-2 py-1 font-medium"
+                className="text-xs border border-slate-300 rounded-lg px-2 py-1 font-medium"
               >
                 <option value={0}>No GST (0%)</option>
                 <option value={5}>GST 5%</option>
@@ -479,27 +493,27 @@ export default function App() {
                   placeholder="Item description"
                   value={item.desc}
                   onChange={(e) => updateItem(idx, 'desc', e.target.value)}
-                  className="col-span-6 px-2.5 py-1.5 border rounded-lg text-xs"
+                  className="col-span-6 px-2 py-1.5 border border-slate-300 rounded-lg text-xs"
                 />
                 <input
                   type="number"
                   placeholder="Qty"
                   value={item.qty}
                   onChange={(e) => updateItem(idx, 'qty', e.target.value)}
-                  className="col-span-2 px-2 py-1.5 border rounded-lg text-xs text-center"
+                  className="col-span-2 px-1.5 py-1.5 border border-slate-300 rounded-lg text-xs text-center"
                 />
                 <input
                   type="number"
                   placeholder="Rate"
                   value={item.rate}
                   onChange={(e) => updateItem(idx, 'rate', e.target.value)}
-                  className="col-span-3 px-2 py-1.5 border rounded-lg text-xs text-right"
+                  className="col-span-3 px-2 py-1.5 border border-slate-300 rounded-lg text-xs text-right"
                 />
                 <button
                   onClick={() => setItems(items.filter((_, i) => i !== idx))}
                   className="col-span-1 text-rose-500 flex justify-center"
                 >
-                  <Trash2 className="w-4 h-4" />
+                  <Trash2 className="w-3.5 h-3.5" />
                 </button>
               </div>
             ))}
@@ -513,212 +527,224 @@ export default function App() {
           </div>
         </div>
 
-        {/* RIGHT PANEL: Live A4 Corporate PDF Preview (Pure Hex Colors for html2pdf) */}
+        {/* RIGHT PANEL: Clean Auto-Fit A4 Preview (No Sideways Scroll on Mobile) */}
         <div className="lg:col-span-7">
-          <div className="bg-white shadow-lg rounded-xl overflow-x-auto border border-slate-200">
+          <div
+            ref={previewContainerRef}
+            className="bg-white shadow-md rounded-xl overflow-hidden border border-slate-200"
+            style={{ height: `${840 * previewScale}px` }}
+          >
             <div
-              ref={pdfRef}
               style={{
-                backgroundColor: '#ffffff',
-                color: '#1e293b',
-                minWidth: '680px',
-                minHeight: '840px',
-                padding: '32px',
-                position: 'relative',
-                display: 'flex',
-                flexDirection: 'column',
-                justifyContent: 'space-between',
-                fontFamily: 'Arial, sans-serif'
+                width: '680px',
+                transform: `scale(${previewScale})`,
+                transformOrigin: 'top left'
               }}
             >
-              {/* Watermark if NOT Pro */}
-              {!isPro && (
-                <div
-                  style={{
-                    position: 'absolute',
-                    inset: 0,
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    pointerEvents: 'none',
-                    opacity: 0.14,
-                    transform: 'rotate(-30deg)'
-                  }}
-                >
-                  <span
-                    style={{
-                      fontSize: '48px',
-                      fontWeight: 900,
-                      color: '#0f172a',
-                      border: '4px solid #0f172a',
-                      padding: '8px 24px'
-                    }}
-                  >
-                    DEMO PREVIEW
-                  </span>
-                </div>
-              )}
-
-              <div>
-                {/* Header */}
-                <div
-                  style={{
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'flex-start',
-                    borderBottom: `2px solid ${profile.brandColor}`,
-                    paddingBottom: '20px'
-                  }}
-                >
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                    {profile.logoBase64 && (
-                      <img
-                        src={profile.logoBase64}
-                        alt="Logo"
-                        style={{ width: '56px', height: '56px', objectFit: 'contain', borderRadius: '4px' }}
-                      />
-                    )}
-                    <div>
-                      <h1 style={{ fontSize: '20px', fontWeight: 800, color: profile.brandColor, margin: 0 }}>
-                        {profile.companyName || 'Your Company Name'}
-                      </h1>
-                      <p style={{ fontSize: '12px', color: '#64748b', margin: '2px 0' }}>{profile.address}</p>
-                      <p style={{ fontSize: '12px', color: '#64748b', margin: '2px 0' }}>Phone: {profile.phone}</p>
-                      {profile.gstin && (
-                        <p style={{ fontSize: '12px', fontWeight: 600, color: '#334155', marginTop: '4px' }}>
-                          GSTIN: {profile.gstin}
-                        </p>
-                      )}
-                    </div>
-                  </div>
-                  <div style={{ textAlign: 'right' }}>
-                    <span
-                      style={{
-                        backgroundColor: profile.brandColor,
-                        color: '#ffffff',
-                        fontSize: '12px',
-                        fontWeight: 700,
-                        padding: '4px 12px',
-                        borderRadius: '4px',
-                        textTransform: 'uppercase',
-                        letterSpacing: '0.05em'
-                      }}
-                    >
-                      {docType}
-                    </span>
-                    <p style={{ fontSize: '14px', fontWeight: 700, marginTop: '8px', marginBottom: '2px' }}>#{docNumber}</p>
-                    <p style={{ fontSize: '12px', color: '#64748b', margin: 0 }}>Date: {docDate}</p>
-                  </div>
-                </div>
-
-                {/* Bill To */}
-                <div
-                  style={{
-                    marginTop: '20px',
-                    backgroundColor: '#f8fafc',
-                    padding: '14px',
-                    borderRadius: '8px',
-                    border: '1px solid #e2e8f0'
-                  }}
-                >
-                  <p style={{ fontSize: '11px', textTransform: 'uppercase', fontWeight: 700, color: '#94a3b8', margin: 0 }}>
-                    Prepared For:
-                  </p>
-                  <p style={{ fontWeight: 700, fontSize: '16px', color: '#1e293b', margin: '2px 0' }}>{clientName}</p>
-                  <p style={{ fontSize: '12px', color: '#475569', margin: '2px 0' }}>{clientAddress}</p>
-                  {clientPhone && (
-                    <p style={{ fontSize: '12px', color: '#475569', margin: '2px 0' }}>Contact: {clientPhone}</p>
-                  )}
-                </div>
-
-                {/* Items Table */}
-                <table style={{ width: '100%', marginTop: '24px', textAlign: 'left', borderCollapse: 'collapse' }}>
-                  <thead>
-                    <tr style={{ backgroundColor: profile.brandColor, color: '#ffffff', fontSize: '12px', textTransform: 'uppercase' }}>
-                      <th style={{ padding: '10px 12px', borderTopLeftRadius: '6px' }}>#</th>
-                      <th style={{ padding: '10px 12px' }}>Description</th>
-                      <th style={{ padding: '10px 12px', textAlign: 'center' }}>Qty</th>
-                      <th style={{ padding: '10px 12px', textAlign: 'right' }}>Rate</th>
-                      <th style={{ padding: '10px 12px', textAlign: 'right', borderTopRightRadius: '6px' }}>Amount</th>
-                    </tr>
-                  </thead>
-                  <tbody style={{ fontSize: '14px' }}>
-                    {items.map((item, i) => (
-                      <tr key={i} style={{ borderBottom: '1px solid #e2e8f0' }}>
-                        <td style={{ padding: '10px 12px', color: '#64748b' }}>{i + 1}</td>
-                        <td style={{ padding: '10px 12px', fontWeight: 500 }}>{item.desc || '-'}</td>
-                        <td style={{ padding: '10px 12px', textAlign: 'center' }}>{item.qty}</td>
-                        <td style={{ padding: '10px 12px', textAlign: 'right' }}>₹{Number(item.rate).toLocaleString('en-IN')}</td>
-                        <td style={{ padding: '10px 12px', textAlign: 'right', fontWeight: 600 }}>
-                          ₹{(Number(item.qty) * Number(item.rate)).toLocaleString('en-IN')}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-
-                {/* Totals */}
-                <div style={{ marginTop: '24px', display: 'flex', justifyContent: 'flex-end' }}>
-                  <div style={{ width: '260px', fontSize: '14px' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', color: '#475569', marginBottom: '6px' }}>
-                      <span>Subtotal:</span>
-                      <span>₹{subtotal.toLocaleString('en-IN')}</span>
-                    </div>
-                    {gstRate > 0 && (
-                      <div style={{ display: 'flex', justifyContent: 'space-between', color: '#475569', marginBottom: '6px' }}>
-                        <span>GST ({gstRate}%):</span>
-                        <span>₹{gstAmount.toLocaleString('en-IN')}</span>
-                      </div>
-                    )}
-                    <div
-                      style={{
-                        display: 'flex',
-                        justifyContent: 'space-between',
-                        fontWeight: 800,
-                        fontSize: '16px',
-                        paddingTop: '8px',
-                        borderTop: `2px solid ${profile.brandColor}`,
-                        color: profile.brandColor
-                      }}
-                    >
-                      <span>Grand Total:</span>
-                      <span>₹{grandTotal.toLocaleString('en-IN')}</span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* Footer: Bank Details & Digital Signature */}
               <div
+                ref={pdfRef}
                 style={{
-                  marginTop: '40px',
-                  paddingTop: '16px',
-                  borderTop: '1px solid #e2e8f0',
+                  backgroundColor: '#ffffff',
+                  color: '#1e293b',
+                  width: '680px',
+                  minHeight: '840px',
+                  padding: '32px',
+                  position: 'relative',
                   display: 'flex',
+                  flexDirection: 'column',
                   justifyContent: 'space-between',
-                  alignItems: 'flex-end'
+                  fontFamily: 'Arial, sans-serif'
                 }}
               >
-                <div style={{ fontSize: '12px', color: '#64748b', maxWidth: '300px' }}>
-                  <p style={{ fontWeight: 700, color: '#334155', marginBottom: '2px' }}>Payment & Terms:</p>
-                  <p style={{ margin: 0 }}>{profile.bankDetails}</p>
-                  <p style={{ marginTop: '4px', fontSize: '11px' }}>Thank you for your business!</p>
+                {/* Watermark if NOT Pro */}
+                {!isPro && (
+                  <div
+                    style={{
+                      position: 'absolute',
+                      inset: 0,
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      pointerEvents: 'none',
+                      opacity: 0.14,
+                      transform: 'rotate(-30deg)'
+                    }}
+                  >
+                    <span
+                      style={{
+                        fontSize: '48px',
+                        fontWeight: 900,
+                        color: '#0f172a',
+                        border: '4px solid #0f172a',
+                        padding: '8px 24px'
+                      }}
+                    >
+                      DEMO PREVIEW
+                    </span>
+                  </div>
+                )}
+
+                <div>
+                  {/* Header */}
+                  <div
+                    style={{
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'flex-start',
+                      borderBottom: `2px solid ${profile.brandColor}`,
+                      paddingBottom: '20px'
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                      {profile.logoBase64 && (
+                        <img
+                          src={profile.logoBase64}
+                          alt="Logo"
+                          style={{ width: '56px', height: '56px', objectFit: 'contain', borderRadius: '4px' }}
+                        />
+                      )}
+                      <div>
+                        <h1 style={{ fontSize: '20px', fontWeight: 800, color: profile.brandColor, margin: 0 }}>
+                          {profile.companyName || 'Your Company Name'}
+                        </h1>
+                        <p style={{ fontSize: '12px', color: '#64748b', margin: '2px 0' }}>{profile.address}</p>
+                        <p style={{ fontSize: '12px', color: '#64748b', margin: '2px 0' }}>Phone: {profile.phone}</p>
+                        {profile.gstin && (
+                          <p style={{ fontSize: '12px', fontWeight: 600, color: '#334155', marginTop: '4px' }}>
+                            GSTIN: {profile.gstin}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                    <div style={{ textAlign: 'right' }}>
+                      <span
+                        style={{
+                          backgroundColor: profile.brandColor,
+                          color: '#ffffff',
+                          fontSize: '12px',
+                          fontWeight: 700,
+                          padding: '4px 12px',
+                          borderRadius: '4px',
+                          textTransform: 'uppercase',
+                          letterSpacing: '0.05em'
+                        }}
+                      >
+                        {docType}
+                      </span>
+                      <p style={{ fontSize: '14px', fontWeight: 700, marginTop: '8px', marginBottom: '2px' }}>#{docNumber}</p>
+                      <p style={{ fontSize: '12px', color: '#64748b', margin: 0 }}>Date: {docDate}</p>
+                    </div>
+                  </div>
+
+                  {/* Bill To */}
+                  <div
+                    style={{
+                      marginTop: '20px',
+                      backgroundColor: '#f8fafc',
+                      padding: '14px',
+                      borderRadius: '8px',
+                      border: '1px solid #e2e8f0'
+                    }}
+                  >
+                    <p style={{ fontSize: '11px', textTransform: 'uppercase', fontWeight: 700, color: '#94a3b8', margin: 0 }}>
+                      Prepared For:
+                    </p>
+                    <p style={{ fontWeight: 700, fontSize: '16px', color: '#1e293b', margin: '2px 0' }}>{clientName}</p>
+                    <p style={{ fontSize: '12px', color: '#475569', margin: '2px 0' }}>{clientAddress}</p>
+                    {clientPhone && (
+                      <p style={{ fontSize: '12px', color: '#475569', margin: '2px 0' }}>Contact: {clientPhone}</p>
+                    )}
+                  </div>
+
+                  {/* Items Table */}
+                  <table style={{ width: '100%', marginTop: '24px', textAlign: 'left', borderCollapse: 'collapse' }}>
+                    <thead>
+                      <tr style={{ backgroundColor: profile.brandColor, color: '#ffffff', fontSize: '12px', textTransform: 'uppercase' }}>
+                        <th style={{ padding: '10px 12px', borderTopLeftRadius: '6px' }}>#</th>
+                        <th style={{ padding: '10px 12px' }}>Description</th>
+                        <th style={{ padding: '10px 12px', textAlign: 'center' }}>Qty</th>
+                        <th style={{ padding: '10px 12px', textAlign: 'right' }}>Rate</th>
+                        <th style={{ padding: '10px 12px', textAlign: 'right', borderTopRightRadius: '6px' }}>Amount</th>
+                      </tr>
+                    </thead>
+                    <tbody style={{ fontSize: '14px' }}>
+                      {items.map((item, i) => (
+                        <tr key={i} style={{ borderBottom: '1px solid #e2e8f0' }}>
+                          <td style={{ padding: '10px 12px', color: '#64748b' }}>{i + 1}</td>
+                          <td style={{ padding: '10px 12px', fontWeight: 500 }}>{item.desc || '-'}</td>
+                          <td style={{ padding: '10px 12px', textAlign: 'center' }}>{item.qty}</td>
+                          <td style={{ padding: '10px 12px', textAlign: 'right' }}>₹{Number(item.rate).toLocaleString('en-IN')}</td>
+                          <td style={{ padding: '10px 12px', textAlign: 'right', fontWeight: 600 }}>
+                            ₹{(Number(item.qty) * Number(item.rate)).toLocaleString('en-IN')}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+
+                  {/* Totals */}
+                  <div style={{ marginTop: '24px', display: 'flex', justifyContent: 'flex-end' }}>
+                    <div style={{ width: '260px', fontSize: '14px' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', color: '#475569', marginBottom: '6px' }}>
+                        <span>Subtotal:</span>
+                        <span>₹{subtotal.toLocaleString('en-IN')}</span>
+                      </div>
+                      {gstRate > 0 && (
+                        <div style={{ display: 'flex', justifyContent: 'space-between', color: '#475569', marginBottom: '6px' }}>
+                          <span>GST ({gstRate}%):</span>
+                          <span>₹{gstAmount.toLocaleString('en-IN')}</span>
+                        </div>
+                      )}
+                      <div
+                        style={{
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          fontWeight: 800,
+                          fontSize: '16px',
+                          paddingTop: '8px',
+                          borderTop: `2px solid ${profile.brandColor}`,
+                          color: profile.brandColor
+                        }}
+                      >
+                        <span>Grand Total:</span>
+                        <span>₹{grandTotal.toLocaleString('en-IN')}</span>
+                      </div>
+                    </div>
+                  </div>
                 </div>
 
-                <div style={{ textAlign: 'center' }}>
-                  {profile.signatureBase64 ? (
-                    <img
-                      src={profile.signatureBase64}
-                      alt="Signature"
-                      style={{ height: '56px', margin: '0 auto', objectFit: 'contain' }}
-                    />
-                  ) : (
-                    <div style={{ height: '56px', width: '128px', borderBottom: '1px solid #cbd5e1', margin: '0 auto' }} />
-                  )}
-                  <p style={{ fontSize: '12px', fontWeight: 700, color: '#334155', marginTop: '4px', marginBottom: 0 }}>
-                    Authorized Signatory
-                  </p>
-                  <p style={{ fontSize: '11px', color: '#94a3b8', margin: 0 }}>{profile.companyName}</p>
+                {/* Footer: Bank Details & Digital Signature */}
+                <div
+                  style={{
+                    marginTop: '40px',
+                    paddingTop: '16px',
+                    borderTop: '1px solid #e2e8f0',
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'flex-end'
+                  }}
+                >
+                  <div style={{ fontSize: '12px', color: '#64748b', maxWidth: '300px' }}>
+                    <p style={{ fontWeight: 700, color: '#334155', marginBottom: '2px' }}>Payment & Terms:</p>
+                    <p style={{ margin: 0 }}>{profile.bankDetails}</p>
+                    <p style={{ marginTop: '4px', fontSize: '11px' }}>Thank you for your business!</p>
+                  </div>
+
+                  <div style={{ textAlign: 'center' }}>
+                    {profile.signatureBase64 ? (
+                      <img
+                        src={profile.signatureBase64}
+                        alt="Signature"
+                        style={{ height: '64px', margin: '0 auto', objectFit: 'contain' }}
+                      />
+                    ) : (
+                      <div style={{ height: '64px', width: '140px', borderBottom: '1px solid #cbd5e1', margin: '0 auto' }} />
+                    )}
+                    <p style={{ fontSize: '12px', fontWeight: 700, color: '#334155', marginTop: '4px', marginBottom: 0 }}>
+                      Authorized Signatory
+                    </p>
+                    <p style={{ fontSize: '11px', color: '#94a3b8', margin: 0 }}>{profile.companyName}</p>
+                  </div>
                 </div>
               </div>
             </div>
@@ -734,27 +760,44 @@ export default function App() {
         </button>
       </footer>
 
+      {/* Compact Sticky Mobile Bottom Bar (PDF & Send on WhatsApp) */}
+      <div className="fixed bottom-0 inset-x-0 z-40 bg-white border-t border-slate-200 px-3 py-2 flex items-center gap-2 md:hidden shadow-lg">
+        <button
+          onClick={downloadPDF}
+          className="flex-1 bg-blue-600 active:bg-blue-700 text-white font-semibold text-xs py-2.5 rounded-lg flex items-center justify-center gap-1.5"
+        >
+          <Download className="w-3.5 h-3.5" /> Download PDF
+        </button>
+        <button
+          onClick={shareOnWhatsApp}
+          disabled={isSharing}
+          className="flex-1 bg-emerald-600 active:bg-emerald-700 text-white font-semibold text-xs py-2.5 rounded-lg flex items-center justify-center gap-1.5"
+        >
+          <Share2 className="w-3.5 h-3.5" /> {isSharing ? 'Preparing...' : 'Send on WhatsApp'}
+        </button>
+      </div>
+
       {/* License Key Activation Modal */}
       {showLicenseModal && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-2xl max-w-md w-full p-6 space-y-4 shadow-xl">
-            <h3 className="text-lg font-bold text-slate-900">Activate Lifetime Pro License</h3>
+          <div className="bg-white rounded-xl max-w-sm w-full p-5 space-y-3 shadow-xl">
+            <h3 className="text-base font-bold text-slate-900">Activate Lifetime Pro License</h3>
             <p className="text-xs text-slate-600">
-              Enter your Lifetime License Key to remove the demo watermark and unlock clean corporate PDF exports.
+              Enter your Lifetime License Key to remove the demo watermark.
             </p>
             <input
               placeholder="e.g. PRO-SHARMA-8C41A9"
               value={keyInput}
               onChange={(e) => setKeyInput(e.target.value)}
-              className="w-full px-3 py-2 border rounded-lg text-sm uppercase font-mono"
+              className="w-full px-3 py-2 border rounded-lg text-xs uppercase font-mono"
             />
             <div className="flex gap-2 justify-end">
-              <button onClick={() => setShowLicenseModal(false)} className="px-4 py-2 text-sm text-slate-600">
+              <button onClick={() => setShowLicenseModal(false)} className="px-3 py-1.5 text-xs text-slate-600">
                 Cancel
               </button>
               <button
                 onClick={handleActivateLicense}
-                className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-semibold"
+                className="px-3.5 py-1.5 bg-blue-600 text-white rounded-lg text-xs font-semibold"
               >
                 Activate Now
               </button>
@@ -766,38 +809,41 @@ export default function App() {
       {/* Admin Key Generator Modal */}
       {showAdminModal && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-2xl max-w-md w-full p-6 space-y-3 shadow-xl">
-            <h3 className="text-lg font-bold text-slate-900">Admin: Generate Client Key</h3>
+          <div className="bg-white rounded-xl max-w-sm w-full p-5 space-y-2.5 shadow-xl">
+            <h3 className="text-base font-bold text-slate-900">Admin: Generate Client Key</h3>
             <input
               type="password"
               placeholder="Enter ADMIN_SECRET"
               value={secretInput}
               onChange={(e) => setSecretInput(e.target.value)}
-              className="w-full px-3 py-2 border rounded-lg text-sm"
+              className="w-full px-3 py-1.5 border rounded-lg text-xs"
             />
             <input
               placeholder="Client Tag (e.g. SHARMA)"
               value={newClientTag}
               onChange={(e) => setNewClientTag(e.target.value)}
-              className="w-full px-3 py-2 border rounded-lg text-sm uppercase"
+              className="w-full px-3 py-1.5 border rounded-lg text-xs uppercase"
             />
             {generatedKey && (
-              <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-lg text-center">
-                <p className="text-xs text-emerald-700">New Key Ready (Copy & Send to Client):</p>
-                <p className="text-lg font-mono font-bold text-emerald-900 select-all">{generatedKey}</p>
+              <div className="p-2.5 bg-emerald-50 border border-emerald-200 rounded-lg text-center">
+                <p className="text-[11px] text-emerald-700">New Key Ready:</p>
+                <p className="text-base font-mono font-bold text-emerald-900 select-all">{generatedKey}</p>
               </div>
             )}
-            <div className="flex gap-2 justify-end pt-2">
+            <div className="flex gap-2 justify-end pt-1">
               <button
                 onClick={() => {
                   setShowAdminModal(false);
                   setGeneratedKey('');
                 }}
-                className="px-4 py-2 text-sm text-slate-600"
+                className="px-3 py-1.5 text-xs text-slate-600"
               >
                 Close
               </button>
-              <button onClick={handleGenerateKey} className="px-4 py-2 bg-slate-900 text-white rounded-lg text-sm font-semibold">
+              <button
+                onClick={handleGenerateKey}
+                className="px-3.5 py-1.5 bg-slate-900 text-white rounded-lg text-xs font-semibold"
+              >
                 Generate Key
               </button>
             </div>
