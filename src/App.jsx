@@ -11,10 +11,17 @@ import {
   Building2,
   FileText,
   Save,
-  Upload
+  Upload,
+  Edit3,
+  Copy,
+  History,
+  FilePlus2,
+  X,
+  Search
 } from 'lucide-react';
 
 const ADMIN_SECRET = import.meta.env.VITE_ADMIN_SECRET || 'MySecretKey2026';
+const DOCS_STORAGE_KEY = 'qq_saved_docs_v1';
 
 function computeSignature(tag) {
   const raw = `${tag.toUpperCase()}::${ADMIN_SECRET}`;
@@ -70,6 +77,20 @@ export default function App() {
         };
   });
 
+  // Saved Documents History Drawer State
+  const [savedDocs, setSavedDocs] = useState(() => {
+    try {
+      const saved = localStorage.getItem(DOCS_STORAGE_KEY);
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+  const [showHistoryDrawer, setShowHistoryDrawer] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [editingDocId, setEditingDocId] = useState(null);
+  const [saveToast, setSaveToast] = useState('');
+
   // Document State
   const [docType, setDocType] = useState('QUOTATION');
   const [docNumber, setDocNumber] = useState('QT-101');
@@ -103,7 +124,25 @@ export default function App() {
     localStorage.setItem('qq_profile', JSON.stringify(profile));
   }, [profile]);
 
-  // Auto-fit A4 preview cleanly on mobile screens without sideways scrolling
+  useEffect(() => {
+    localStorage.setItem(DOCS_STORAGE_KEY, JSON.stringify(savedDocs));
+  }, [savedDocs]);
+
+  // Restore saved signature onto canvas
+  useEffect(() => {
+    if (profile.signatureBase64 && canvasRef.current) {
+      const canvas = canvasRef.current;
+      const ctx = canvas.getContext('2d');
+      const img = new Image();
+      img.onload = () => {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      };
+      img.src = profile.signatureBase64;
+    }
+  }, [profile.signatureBase64]);
+
+  // Auto-fit A4 preview cleanly on mobile screens
   useEffect(() => {
     const updateScale = () => {
       if (!previewContainerRef.current) return;
@@ -115,6 +154,105 @@ export default function App() {
     window.addEventListener('resize', updateScale);
     return () => window.removeEventListener('resize', updateScale);
   }, []);
+
+  // Calculations
+  const subtotal = items.reduce((acc, item) => acc + Number(item.qty) * Number(item.rate), 0);
+  const gstAmount = (subtotal * Number(gstRate)) / 100;
+  const grandTotal = subtotal + gstAmount;
+
+  const triggerToast = (msg) => {
+    setSaveToast(msg);
+    setTimeout(() => setSaveToast(''), 2500);
+  };
+
+  // Save or Update Current Quotation/Invoice
+  const handleSaveDocument = (silent = false) => {
+    const now = new Date().toISOString();
+    const docSnapshot = {
+      docType,
+      docNumber,
+      docDate,
+      clientName,
+      clientPhone,
+      clientAddress,
+      gstRate,
+      items: items.map((item) => ({ ...item })),
+      grandTotal,
+      updatedAt: now
+    };
+
+    if (editingDocId) {
+      setSavedDocs((prev) =>
+        prev.map((d) => (d.id === editingDocId ? { ...d, ...docSnapshot } : d))
+      );
+      if (!silent) triggerToast(`Updated ${docNumber}!`);
+    } else {
+      const newId = `DOC-${Date.now()}`;
+      setSavedDocs((prev) => [{ id: newId, createdAt: now, ...docSnapshot }, ...prev]);
+      setEditingDocId(newId);
+      if (!silent) triggerToast(`Saved ${docNumber}!`);
+    }
+  };
+
+  // Load a saved document into editor (Edit Mode)
+  const handleEditDocument = (doc) => {
+    setEditingDocId(doc.id);
+    setDocType(doc.docType);
+    setDocNumber(doc.docNumber);
+    setDocDate(doc.docDate);
+    setClientName(doc.clientName);
+    setClientPhone(doc.clientPhone || '');
+    setClientAddress(doc.clientAddress || '');
+    setGstRate(doc.gstRate ?? 18);
+    setItems(doc.items.map((item) => ({ ...item })));
+    setShowHistoryDrawer(false);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+    triggerToast(`Editing ${doc.docNumber}`);
+  };
+
+  // Duplicate a saved document as a Revision
+  const handleReviseDocument = (doc) => {
+    setEditingDocId(null);
+    setDocType(doc.docType);
+    setDocNumber(`${doc.docNumber}-Rev`);
+    setDocDate(new Date().toISOString().split('T')[0]);
+    setClientName(doc.clientName);
+    setClientPhone(doc.clientPhone || '');
+    setClientAddress(doc.clientAddress || '');
+    setGstRate(doc.gstRate ?? 18);
+    setItems(doc.items.map((item) => ({ ...item })));
+    setShowHistoryDrawer(false);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+    triggerToast(`Created revision from ${doc.docNumber}`);
+  };
+
+  // Start fresh blank document
+  const handleNewDocument = () => {
+    setEditingDocId(null);
+    const nextNum = 101 + savedDocs.length;
+    setDocNumber(docType === 'QUOTATION' ? `QT-${nextNum}` : `INV-${nextNum}`);
+    setDocDate(new Date().toISOString().split('T')[0]);
+    setClientName('');
+    setClientPhone('');
+    setClientAddress('');
+    setItems([{ desc: '', qty: 1, rate: 0 }]);
+    triggerToast('Started new blank document');
+  };
+
+  const handleDeleteDocument = (id) => {
+    setSavedDocs((prev) => prev.filter((d) => d.id !== id));
+    if (editingDocId === id) setEditingDocId(null);
+  };
+
+  // Filter saved docs in drawer
+  const filteredDocs = savedDocs.filter((doc) => {
+    const q = searchQuery.toLowerCase();
+    return (
+      (doc.clientName || '').toLowerCase().includes(q) ||
+      (doc.docNumber || '').toLowerCase().includes(q) ||
+      (doc.clientPhone || '').includes(q)
+    );
+  });
 
   const handleActivateLicense = () => {
     if (validateSignedKey(keyInput)) {
@@ -136,7 +274,8 @@ export default function App() {
   };
 
   const exportProfileBackup = () => {
-    const blob = new Blob([JSON.stringify(profile, null, 2)], { type: 'application/json' });
+    const backupPayload = { profile, savedDocs };
+    const blob = new Blob([JSON.stringify(backupPayload, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -151,8 +290,14 @@ export default function App() {
     const reader = new FileReader();
     reader.onload = (event) => {
       try {
-        setProfile(JSON.parse(event.target.result));
-        alert('Business profile & signature restored!');
+        const parsed = JSON.parse(event.target.result);
+        if (parsed.profile) {
+          setProfile(parsed.profile);
+          if (Array.isArray(parsed.savedDocs)) setSavedDocs(parsed.savedDocs);
+        } else {
+          setProfile(parsed);
+        }
+        alert('Business profile, signature & saved documents restored!');
       } catch {
         alert('Invalid backup file.');
       }
@@ -214,11 +359,6 @@ export default function App() {
     setProfile({ ...profile, signatureBase64: '' });
   };
 
-  // Calculations
-  const subtotal = items.reduce((acc, item) => acc + Number(item.qty) * Number(item.rate), 0);
-  const gstAmount = (subtotal * Number(gstRate)) / 100;
-  const grandTotal = subtotal + gstAmount;
-
   const updateItem = (idx, field, val) => {
     const updated = [...items];
     updated[idx][field] = val;
@@ -227,19 +367,21 @@ export default function App() {
 
   const getPdfOptions = () => ({
     margin: 0.3,
-    filename: `${docType}_${clientName.replace(/\s+/g, '_')}_${docNumber}.pdf`,
+    filename: `${docType}_${(clientName || 'Client').replace(/\s+/g, '_')}_${docNumber}.pdf`,
     image: { type: 'jpeg', quality: 0.98 },
     html2canvas: { scale: 2, useCORS: true },
     jsPDF: { unit: 'in', format: 'a4', orientation: 'portrait' }
   });
 
   const downloadPDF = () => {
+    handleSaveDocument(true);
     html2pdf().set(getPdfOptions()).from(pdfRef.current).save();
   };
 
   const shareOnWhatsApp = async () => {
     if (isSharing) return;
     setIsSharing(true);
+    handleSaveDocument(true);
     const opt = getPdfOptions();
     try {
       const pdfBlob = await html2pdf().set(opt).from(pdfRef.current).outputPdf('blob');
@@ -267,6 +409,13 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-slate-100 text-slate-800 pb-16 md:pb-6">
+      {/* Toast Notification */}
+      {saveToast && (
+        <div className="fixed top-14 right-4 z-50 bg-slate-900 text-white text-xs font-medium px-3.5 py-2 rounded-lg shadow-lg border border-slate-700">
+          {saveToast}
+        </div>
+      )}
+
       {/* Compact Top Navbar */}
       <header className="sticky top-0 z-30 bg-slate-900 text-white px-3.5 py-2.5 shadow-md flex items-center justify-between gap-2">
         <div className="flex items-center gap-2">
@@ -284,14 +433,29 @@ export default function App() {
         </div>
 
         <div className="flex items-center gap-2">
+          {/* History Button (Works on both Mobile & Desktop) */}
+          <button
+            onClick={() => setShowHistoryDrawer(true)}
+            className="bg-slate-800 hover:bg-slate-700 text-slate-100 font-semibold text-xs px-2.5 py-1.5 rounded-lg flex items-center gap-1.5 border border-slate-700 transition"
+          >
+            <History className="w-3.5 h-3.5 text-blue-400" />
+            <span>History</span>
+            {savedDocs.length > 0 && (
+              <span className="bg-blue-600 text-white text-[10px] px-1.5 py-0.2 rounded-full">
+                {savedDocs.length}
+              </span>
+            )}
+          </button>
+
           {!isPro && (
             <button
               onClick={() => setShowLicenseModal(true)}
               className="bg-amber-500 hover:bg-amber-600 text-slate-950 font-semibold text-xs px-2.5 py-1.5 rounded-lg flex items-center gap-1 transition"
             >
-              <Key className="w-3.5 h-3.5" /> Unlock Pro
+              <Key className="w-3.5 h-3.5" /> <span className="hidden sm:inline">Unlock Pro</span>
             </button>
           )}
+
           <div className="hidden md:flex items-center gap-2">
             <button
               onClick={downloadPDF}
@@ -310,25 +474,49 @@ export default function App() {
         </div>
       </header>
 
-      {/* Main Split Workspace */}
+      {/* Main Split Workspace (Clean & Uncluttered) */}
       <main className="max-w-7xl mx-auto p-3 sm:p-4 grid grid-cols-1 lg:grid-cols-12 gap-4">
         {/* LEFT PANEL: Compact Editor Controls */}
         <div className="lg:col-span-5 space-y-3">
           {/* 1. Document Type & Meta */}
           <div className="bg-white p-3.5 rounded-xl shadow-sm border border-slate-200 space-y-2.5">
-            <div className="flex gap-1.5">
-              {['QUOTATION', 'TAX INVOICE'].map((type) => (
-                <button
-                  key={type}
-                  onClick={() => setDocType(type)}
-                  className={`flex-1 py-1.5 rounded-lg font-semibold text-xs transition ${
-                    docType === type ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600'
-                  }`}
-                >
-                  {type}
-                </button>
-              ))}
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex flex-1 gap-1.5">
+                {['QUOTATION', 'TAX INVOICE'].map((type) => (
+                  <button
+                    key={type}
+                    onClick={() => setDocType(type)}
+                    className={`flex-1 py-1.5 rounded-lg font-semibold text-xs transition ${
+                      docType === type ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600'
+                    }`}
+                  >
+                    {type}
+                  </button>
+                ))}
+              </div>
+              <button
+                onClick={handleNewDocument}
+                title="Create New Blank Document"
+                className="px-2.5 py-1.5 bg-blue-50 text-blue-700 hover:bg-blue-100 rounded-lg text-xs font-semibold flex items-center gap-1 shrink-0"
+              >
+                <FilePlus2 className="w-3.5 h-3.5" /> New
+              </button>
             </div>
+
+            {editingDocId && (
+              <div className="bg-amber-50 border border-amber-200 px-2.5 py-1.5 rounded-lg flex items-center justify-between text-xs text-amber-800">
+                <span>
+                  Editing saved <strong>{docNumber}</strong>
+                </span>
+                <button
+                  onClick={() => setEditingDocId(null)}
+                  className="underline font-semibold text-amber-900"
+                >
+                  Save as New
+                </button>
+              </div>
+            )}
+
             <div className="grid grid-cols-2 gap-2.5">
               <div>
                 <label className="text-[11px] font-medium text-slate-500">Document No.</label>
@@ -350,7 +538,97 @@ export default function App() {
             </div>
           </div>
 
-          {/* 2. Business Profile & Enlarged Signature Box */}
+          {/* 2. Client Details */}
+          <div className="bg-white p-3.5 rounded-xl shadow-sm border border-slate-200 space-y-2">
+            <h2 className="font-bold text-xs sm:text-sm text-slate-700">Client Details (Bill To)</h2>
+            <div className="grid grid-cols-2 gap-2">
+              <input
+                placeholder="Client / Party Name"
+                value={clientName}
+                onChange={(e) => setClientName(e.target.value)}
+                className="px-2.5 py-1.5 border border-slate-300 rounded-lg text-xs sm:text-sm"
+              />
+              <input
+                type="tel"
+                placeholder="Client WhatsApp No."
+                value={clientPhone}
+                onChange={(e) => setClientPhone(e.target.value)}
+                className="px-2.5 py-1.5 border border-slate-300 rounded-lg text-xs sm:text-sm"
+              />
+              <input
+                placeholder="Client City / Address"
+                value={clientAddress}
+                onChange={(e) => setClientAddress(e.target.value)}
+                className="px-2.5 py-1.5 border border-slate-300 rounded-lg text-xs sm:text-sm col-span-2"
+              />
+            </div>
+          </div>
+
+          {/* 3. Compact Line Items & GST */}
+          <div className="bg-white p-3.5 rounded-xl shadow-sm border border-slate-200 space-y-2.5">
+            <div className="flex items-center justify-between">
+              <h2 className="font-bold text-xs sm:text-sm text-slate-700">Items & Services</h2>
+              <select
+                value={gstRate}
+                onChange={(e) => setGstRate(Number(e.target.value))}
+                className="text-xs border border-slate-300 rounded-lg px-2 py-1 font-medium"
+              >
+                <option value={0}>No GST (0%)</option>
+                <option value={5}>GST 5%</option>
+                <option value={12}>GST 12%</option>
+                <option value={18}>GST 18%</option>
+                <option value={28}>GST 28%</option>
+              </select>
+            </div>
+
+            {items.map((item, idx) => (
+              <div key={idx} className="grid grid-cols-12 gap-1.5 items-center">
+                <input
+                  placeholder="Item description"
+                  value={item.desc}
+                  onChange={(e) => updateItem(idx, 'desc', e.target.value)}
+                  className="col-span-6 px-2 py-1.5 border border-slate-300 rounded-lg text-xs"
+                />
+                <input
+                  type="number"
+                  placeholder="Qty"
+                  value={item.qty}
+                  onChange={(e) => updateItem(idx, 'qty', e.target.value)}
+                  className="col-span-2 px-1.5 py-1.5 border border-slate-300 rounded-lg text-xs text-center"
+                />
+                <input
+                  type="number"
+                  placeholder="Rate"
+                  value={item.rate}
+                  onChange={(e) => updateItem(idx, 'rate', e.target.value)}
+                  className="col-span-3 px-2 py-1.5 border border-slate-300 rounded-lg text-xs text-right"
+                />
+                <button
+                  onClick={() => setItems(items.filter((_, i) => i !== idx))}
+                  className="col-span-1 text-rose-500 flex justify-center"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            ))}
+
+            <div className="flex gap-2">
+              <button
+                onClick={() => setItems([...items, { desc: '', qty: 1, rate: 0 }])}
+                className="flex-1 py-1.5 border border-dashed border-blue-400 text-blue-600 rounded-lg text-xs font-semibold flex items-center justify-center gap-1 hover:bg-blue-50"
+              >
+                <Plus className="w-3.5 h-3.5" /> Add Item
+              </button>
+              <button
+                onClick={() => handleSaveDocument(false)}
+                className="px-3.5 py-1.5 bg-slate-900 text-white rounded-lg text-xs font-semibold flex items-center gap-1 hover:bg-slate-800"
+              >
+                <Save className="w-3.5 h-3.5" /> {editingDocId ? 'Update' : 'Save'}
+              </button>
+            </div>
+          </div>
+
+          {/* 4. Business Profile & Enlarged Signature Box */}
           <div className="bg-white p-3.5 rounded-xl shadow-sm border border-slate-200 space-y-2.5">
             <div className="flex items-center justify-between">
               <h2 className="font-bold text-xs sm:text-sm flex items-center gap-1.5 text-slate-700">
@@ -420,7 +698,7 @@ export default function App() {
               </div>
             </div>
 
-            {/* ONLY THIS BOX IS ENLARGED: Digital Signature Pad */}
+            {/* Digital Signature Pad */}
             <div className="pt-1">
               <div className="flex items-center justify-between mb-1">
                 <span className="text-xs font-medium text-slate-600">Draw Digital Signature Below:</span>
@@ -443,91 +721,9 @@ export default function App() {
               />
             </div>
           </div>
-
-          {/* 3. Client Details */}
-          <div className="bg-white p-3.5 rounded-xl shadow-sm border border-slate-200 space-y-2">
-            <h2 className="font-bold text-xs sm:text-sm text-slate-700">Client Details (Bill To)</h2>
-            <div className="grid grid-cols-2 gap-2">
-              <input
-                placeholder="Client / Party Name"
-                value={clientName}
-                onChange={(e) => setClientName(e.target.value)}
-                className="px-2.5 py-1.5 border border-slate-300 rounded-lg text-xs sm:text-sm"
-              />
-              <input
-                type="tel"
-                placeholder="Client WhatsApp No."
-                value={clientPhone}
-                onChange={(e) => setClientPhone(e.target.value)}
-                className="px-2.5 py-1.5 border border-slate-300 rounded-lg text-xs sm:text-sm"
-              />
-              <input
-                placeholder="Client City / Address"
-                value={clientAddress}
-                onChange={(e) => setClientAddress(e.target.value)}
-                className="px-2.5 py-1.5 border border-slate-300 rounded-lg text-xs sm:text-sm col-span-2"
-              />
-            </div>
-          </div>
-
-          {/* 4. Compact Line Items & GST */}
-          <div className="bg-white p-3.5 rounded-xl shadow-sm border border-slate-200 space-y-2.5">
-            <div className="flex items-center justify-between">
-              <h2 className="font-bold text-xs sm:text-sm text-slate-700">Items & Services</h2>
-              <select
-                value={gstRate}
-                onChange={(e) => setGstRate(Number(e.target.value))}
-                className="text-xs border border-slate-300 rounded-lg px-2 py-1 font-medium"
-              >
-                <option value={0}>No GST (0%)</option>
-                <option value={5}>GST 5%</option>
-                <option value={12}>GST 12%</option>
-                <option value={18}>GST 18%</option>
-                <option value={28}>GST 28%</option>
-              </select>
-            </div>
-
-            {items.map((item, idx) => (
-              <div key={idx} className="grid grid-cols-12 gap-1.5 items-center">
-                <input
-                  placeholder="Item description"
-                  value={item.desc}
-                  onChange={(e) => updateItem(idx, 'desc', e.target.value)}
-                  className="col-span-6 px-2 py-1.5 border border-slate-300 rounded-lg text-xs"
-                />
-                <input
-                  type="number"
-                  placeholder="Qty"
-                  value={item.qty}
-                  onChange={(e) => updateItem(idx, 'qty', e.target.value)}
-                  className="col-span-2 px-1.5 py-1.5 border border-slate-300 rounded-lg text-xs text-center"
-                />
-                <input
-                  type="number"
-                  placeholder="Rate"
-                  value={item.rate}
-                  onChange={(e) => updateItem(idx, 'rate', e.target.value)}
-                  className="col-span-3 px-2 py-1.5 border border-slate-300 rounded-lg text-xs text-right"
-                />
-                <button
-                  onClick={() => setItems(items.filter((_, i) => i !== idx))}
-                  className="col-span-1 text-rose-500 flex justify-center"
-                >
-                  <Trash2 className="w-3.5 h-3.5" />
-                </button>
-              </div>
-            ))}
-
-            <button
-              onClick={() => setItems([...items, { desc: '', qty: 1, rate: 0 }])}
-              className="w-full py-1.5 border border-dashed border-blue-400 text-blue-600 rounded-lg text-xs font-semibold flex items-center justify-center gap-1 hover:bg-blue-50"
-            >
-              <Plus className="w-3.5 h-3.5" /> Add Another Item
-            </button>
-          </div>
         </div>
 
-        {/* RIGHT PANEL: Clean Auto-Fit A4 Preview (No Sideways Scroll on Mobile) */}
+        {/* RIGHT PANEL: Clean Auto-Fit A4 Preview */}
         <div className="lg:col-span-7">
           <div
             ref={previewContainerRef}
@@ -760,22 +956,124 @@ export default function App() {
         </button>
       </footer>
 
-      {/* Compact Sticky Mobile Bottom Bar (PDF & Send on WhatsApp) */}
+      {/* Compact Sticky Mobile Bottom Bar */}
       <div className="fixed bottom-0 inset-x-0 z-40 bg-white border-t border-slate-200 px-3 py-2 flex items-center gap-2 md:hidden shadow-lg">
+        <button
+          onClick={() => handleSaveDocument(false)}
+          className="bg-slate-800 active:bg-slate-900 text-white font-semibold text-xs px-3 py-2.5 rounded-lg flex items-center justify-center gap-1"
+        >
+          <Save className="w-3.5 h-3.5" /> Save
+        </button>
         <button
           onClick={downloadPDF}
           className="flex-1 bg-blue-600 active:bg-blue-700 text-white font-semibold text-xs py-2.5 rounded-lg flex items-center justify-center gap-1.5"
         >
-          <Download className="w-3.5 h-3.5" /> Download PDF
+          <Download className="w-3.5 h-3.5" /> PDF
         </button>
         <button
           onClick={shareOnWhatsApp}
           disabled={isSharing}
           className="flex-1 bg-emerald-600 active:bg-emerald-700 text-white font-semibold text-xs py-2.5 rounded-lg flex items-center justify-center gap-1.5"
         >
-          <Share2 className="w-3.5 h-3.5" /> {isSharing ? 'Preparing...' : 'Send on WhatsApp'}
+          <Share2 className="w-3.5 h-3.5" /> {isSharing ? 'Wait...' : 'WhatsApp'}
         </button>
       </div>
+
+      {/* SLIDE-OVER HISTORY DRAWER (Clean & Scalable for 100+ Bills) */}
+      {showHistoryDrawer && (
+        <div className="fixed inset-0 z-50 flex justify-end bg-black/50 backdrop-blur-[1px]">
+          <div className="bg-white w-full max-w-md h-full shadow-2xl flex flex-col">
+            {/* Drawer Header */}
+            <div className="p-4 bg-slate-900 text-white flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <History className="w-4 h-4 text-blue-400" />
+                <h3 className="font-bold text-sm">Saved Bills & Quotations ({savedDocs.length})</h3>
+              </div>
+              <button
+                onClick={() => setShowHistoryDrawer(false)}
+                className="p-1 rounded-lg hover:bg-slate-800 text-slate-300"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Search Input */}
+            <div className="p-3 border-b border-slate-200 bg-slate-50">
+              <div className="relative">
+                <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-2.5" />
+                <input
+                  type="text"
+                  placeholder="Search by client name, phone, or QT-101..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="w-full pl-8 pr-3 py-1.5 bg-white border border-slate-300 rounded-lg text-xs focus:outline-none focus:border-blue-500"
+                />
+              </div>
+            </div>
+
+            {/* Scrollable List */}
+            <div className="flex-1 overflow-y-auto p-3 space-y-2">
+              {filteredDocs.length === 0 ? (
+                <div className="text-center py-12 text-slate-400 text-xs">
+                  {savedDocs.length === 0
+                    ? 'No saved bills yet. Click Save or Download PDF to store them here.'
+                    : 'No matching quotation found.'}
+                </div>
+              ) : (
+                filteredDocs.map((doc) => (
+                  <div
+                    key={doc.id}
+                    className={`p-3 rounded-xl border transition ${
+                      editingDocId === doc.id
+                        ? 'border-blue-400 bg-blue-50/50'
+                        : 'border-slate-200 bg-white hover:border-slate-300'
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-slate-100 text-slate-700">
+                            {doc.docNumber}
+                          </span>
+                          <span className="text-[10px] text-slate-400">{doc.docType}</span>
+                        </div>
+                        <p className="text-sm font-bold text-slate-800 truncate mt-1">
+                          {doc.clientName || 'Unnamed Client'}
+                        </p>
+                        <p className="text-xs text-slate-500 mt-0.5">
+                          ₹{Number(doc.grandTotal).toLocaleString('en-IN')} • {doc.items.length} items • {doc.docDate}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2 mt-2.5 pt-2 border-t border-slate-100">
+                      <button
+                        onClick={() => handleEditDocument(doc)}
+                        className="flex-1 py-1.5 text-xs font-semibold bg-blue-600 text-white hover:bg-blue-700 rounded-lg flex items-center justify-center gap-1"
+                      >
+                        <Edit3 className="w-3 h-3" /> Edit
+                      </button>
+                      <button
+                        onClick={() => handleReviseDocument(doc)}
+                        className="flex-1 py-1.5 text-xs font-semibold bg-amber-50 text-amber-800 border border-amber-200 hover:bg-amber-100 rounded-lg flex items-center justify-center gap-1"
+                      >
+                        <Copy className="w-3 h-3" /> Duplicate / Revise
+                      </button>
+                      <button
+                        onClick={() => handleDeleteDocument(doc.id)}
+                        title="Delete"
+                        className="p-1.5 text-rose-500 hover:bg-rose-50 rounded-lg border border-transparent hover:border-rose-200"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* License Key Activation Modal */}
       {showLicenseModal && (
